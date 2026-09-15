@@ -183,15 +183,27 @@ int main(int argc, char** argv)
   sigtermTag = g_unix_signal_add(SIGTERM, CleanupSignalHandler, nullptr);
   sighupTag = g_unix_signal_add(SIGHUP, CleanupSignalHandler, nullptr);
 
+  desktop = nullptr;
   try {
-    if (PortalDesktop::available()) {
+    if (PortalDesktop::available())
       desktop = new PortalDesktop();
-    } else if (WaylandDesktop::available()) {
+  } catch (std::exception& e) {
+    vlog.debug("PortalDesktop unavailable: %s", e.what());
+  }
+
+  try {
+    if (!desktop && WaylandDesktop::available())
       desktop = new WaylandDesktop(loop);
-    } else {
-      fprintf(stderr, "No remote desktop implementation found.\n");
-      return -1;
-    }
+  } catch (std::exception& e) {
+    vlog.debug("WaylandDesktop unavailable: %s", e.what());
+  }
+
+  if (!desktop) {
+    fprintf(stderr, "No remote desktop implementation found.\n");
+    return -1;
+  }
+
+  try {
     server = new rfb::VNCServerST(desktopName, desktop);
     timerSource = new RFBTimerSource();
     monitor = new GSocketSource(server, &listeners);
