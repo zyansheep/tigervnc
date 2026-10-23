@@ -131,6 +131,9 @@ void PipeWirePixelBuffer::processFrame(spa_buffer* buffer)
   // Clamp damage outside of framebuffer
   region = region.intersect(getRect());
 
+  if (region.is_empty())
+    region = getRect();
+
   srcBuffer = (uint8_t*)buffer->datas[0].data;
   srcStride = chunk->stride / (pipewirePixelFormat.bpp / 8);
 
