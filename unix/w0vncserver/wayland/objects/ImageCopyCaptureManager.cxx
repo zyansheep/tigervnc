@@ -54,14 +54,23 @@ ImageCopyCaptureManager::ImageCopyCaptureManager(Display* display_,
            &ext_image_copy_capture_manager_v1_interface),
     manager(nullptr), display(display_), source(source_),
     session(nullptr), seat(seat_), cursorSession(nullptr),
+    cursorPointerSerial(0),
     bufferEventCb(bufferEventCb_), cursorImageCb(cursorImageCb_),
     cursorPosCb(cursorPosCb_), stoppedCb(stoppedCb_)
 {
   manager = (ext_image_copy_capture_manager_v1*)boundObject;
+
+  // The seat may have no pointer yet (a headless compositor gets one only
+  // from our virtual pointer), or may gain or lose one later
+  seat->addPointerListener(this, [this]() {
+    if (session)
+      updateCursorSession();
+  });
 }
 
 ImageCopyCaptureManager::~ImageCopyCaptureManager()
 {
+  seat->removePointerListener(this);
   delete cursorSession;
   delete session;
   if (manager)
@@ -71,8 +80,6 @@ ImageCopyCaptureManager::~ImageCopyCaptureManager()
 void ImageCopyCaptureManager::createSession()
 {
   ext_image_copy_capture_session_v1* sessionHandle;
-  ext_image_copy_capture_cursor_session_v1* cursorSessionHandle;
-  Pointer* pointer;
 
   sessionHandle =
     ext_image_copy_capture_manager_v1_create_session(manager, source->getSource(), 0);
@@ -82,13 +89,35 @@ void ImageCopyCaptureManager::createSession()
   session = new ImageCopyCaptureSession(display, sessionHandle,
                                         bufferEventCb, stoppedCb);
 
+  updateCursorSession();
+}
+
+void ImageCopyCaptureManager::updateCursorSession()
+{
+  ext_image_copy_capture_cursor_session_v1* cursorSessionHandle;
+  Pointer* pointer;
+
   pointer = seat->getPointer();
-  // FIXME: Make it possible to re-enable this if a cursor is added in
-  // the future like we do in VirtualKeyboard
+
+  if (cursorSession &&
+      (!pointer || seat->getPointerSerial() != cursorPointerSerial)) {
+    vlog.debug("Pointer changed - recreating cursor capture session");
+    delete cursorSession;
+    cursorSession = nullptr;
+  }
+
+  if (cursorSession)
+    return;
+
   if (!pointer) {
-    vlog.error("Unable to create cursor capture session: no pointer found - cursor will be invisible");
+    if (cursorPointerSerial == 0) {
+      vlog.debug("No pointer yet - cursor will be invisible until there is one");
+      cursorPointerSerial = (uint32_t)-1;
+    }
     return;
   }
+
+  cursorPointerSerial = seat->getPointerSerial();
 
   cursorSessionHandle =
     ext_image_copy_capture_manager_v1_create_pointer_cursor_session(manager,
@@ -99,8 +128,14 @@ void ImageCopyCaptureManager::createSession()
     return;
   }
 
-  cursorSession = new ImageCopyCaptureCursorSession(display,
-                                                    cursorSessionHandle,
-                                                    cursorImageCb,
-                                                    cursorPosCb);
+  try {
+    cursorSession = new ImageCopyCaptureCursorSession(display,
+                                                      cursorSessionHandle,
+                                                      cursorImageCb,
+                                                      cursorPosCb);
+  } catch (std::exception& e) {
+    vlog.error("%s - cursor will be invisible", e.what());
+    return;
+  }
+  vlog.debug("Cursor capture session created");
 }
