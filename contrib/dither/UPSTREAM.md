@@ -14,7 +14,8 @@ The `dither` branch carries two kinds of commits on top of TigerVNC's latest sta
 2. **Our own four commits.** They are drafted below as one pull request. The same four commits rebased onto master
    are on the fork's branch
    [`upstream-w0vncserver-headless`](https://github.com/zyansheep/tigervnc/tree/upstream-w0vncserver-headless),
-   with master's translated log messages kept.
+   with master's translated log messages kept. That branch builds on master (d07907c8a154) and passes the same smoke
+   test.
 
 ---
 

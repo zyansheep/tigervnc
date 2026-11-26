@@ -35,7 +35,8 @@ work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/dither-ci-XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 stage "Find upstream's newest stable tag"
-git fetch --quiet --no-tags "https://github.com/$UPSTREAM.git" '+refs/tags/*:refs/upstream-tags/*'
+# DITHER_UPSTREAM_URL: another upstream to fetch tags from (a local repository, to try a rebase by hand).
+git fetch --quiet --no-tags "${DITHER_UPSTREAM_URL:-https://github.com/$UPSTREAM.git}" '+refs/tags/*:refs/upstream-tags/*'
 stable=$(git for-each-ref --format='%(refname:lstrip=2)' refs/upstream-tags | grep -E "$STABLE_TAG_RE" | sort -V)
 newest=$(tail -n1 <<<"$stable")
 base=
