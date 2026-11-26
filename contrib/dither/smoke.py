@@ -190,7 +190,7 @@ class WlCopy:
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.s.connect(path)
         self.next_id, self.buf, self.fds, self.out = 2, b"", [], b""
-        self.sent = 0
+        self.sent, self.error, self.closed = 0, None, False
 
     def new_id(self):
         self.next_id += 1
@@ -267,13 +267,18 @@ class WlCopy:
                     fd = self.fds.pop(0)
                     try:
                         os.write(fd, self.text)
+                        self.sent += 1
+                    except BrokenPipeError:
+                        # The reader gave up on this one (a read cancelled for a newer selection), as it may.
+                        pass
                     finally:
                         os.close(fd)
-                    self.sent += 1
-        except (Fail, OSError):
-            pass
+        except (Fail, OSError) as e:
+            if not self.closed:
+                self.error = e
 
     def close(self):
+        self.closed = True
         self.s.close()
 
 
@@ -406,6 +411,8 @@ def main():
         try:
             rfb.read_until("ServerCutText with a browser's copy (SendPrimary on)", lambda m: m[0] == "cut" and m[1] == both_text)
             rfb2.read_until("ServerCutText with a browser's copy (SendPrimary off)", lambda m: m[0] == "cut" and m[1] == both_text)
+        except Fail as e:
+            raise Fail(f"{e} (the copying client: {copier.error or 'still serving'}, {copier.sent} answered)") from None
         finally:
             copier.close()
         log("a browser's copy reached both viewers")
