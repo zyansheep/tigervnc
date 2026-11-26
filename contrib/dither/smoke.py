@@ -8,7 +8,10 @@ What it checks, each by waiting for the exact thing it expects (a log line, a me
   3. The seat has no keyboard, so w0vncserver must give its virtual keyboard a keymap: it logs that the keymap is set,
      and a key event for "a" reaches a Wayland client (wev) as the keysym a.
   4. Clipboard both ways over ext-data-control-v1 (or zwlr-data-control): text copied in the compositor with wl-copy
-     arrives as ServerCutText, and ClientCutText from the viewer comes out of wl-paste.
+     arrives as ServerCutText, and ClientCutText from the viewer comes out of wl-paste. Then a copy made as a browser
+     makes one, the clipboard and the primary selection set together before either is read, reaches the viewer too,
+     both with SendPrimary on (a second server's viewer) and off: the second offer must neither cancel reading the
+     first nor leave the read it asks for unmade.
   5. The pointer moves and a visible cursor shape arrives (rich cursor pseudo-encoding): the seat had no pointer when
      capture started, so this needs the cursor session made once the virtual pointer exists.
   6. w0vncserver is still running at the end.
@@ -26,6 +29,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 WIDTH, HEIGHT = 1024, 768
@@ -174,6 +178,105 @@ class Rfb:
                 return msg
 
 
+class WlCopy:
+    """Just enough of a Wayland client to own the clipboard and the primary selection at once, as a browser does on a
+    copy (ext-data-control-v1): both set in one write, before any request for their data is answered; then every
+    request is answered with the text, until close()."""
+
+    UTF8 = "text/plain;charset=utf-8"
+
+    def __init__(self, path, text):
+        self.text = text.encode()
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.s.connect(path)
+        self.next_id, self.buf, self.fds, self.out = 2, b"", [], b""
+        self.sent = 0
+
+    def new_id(self):
+        self.next_id += 1
+        return self.next_id - 1
+
+    @staticmethod
+    def string(t):
+        b = t.encode() + b"\0"
+        return struct.pack("<I", len(b)) + b + b"\0" * (-len(b) % 4)
+
+    def req(self, obj, op, payload=b""):
+        self.out += struct.pack("<II", obj, ((8 + len(payload)) << 16) | op) + payload
+
+    def flush(self):
+        self.s.sendall(self.out)
+        self.out = b""
+
+    def recv(self):
+        """One event: (object, opcode, payload); the fds it carries are kept in order."""
+        while len(self.buf) < 8 or len(self.buf) < struct.unpack_from("<II", self.buf)[1] >> 16:
+            data, anc, _, _ = self.s.recvmsg(65536, socket.CMSG_SPACE(16 * 4))
+            if not data:
+                raise Fail("the compositor closed WlCopy's connection")
+            for level, kind, d in anc:
+                if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                    self.fds += struct.unpack(f"<{len(d) // 4}i", d[: len(d) // 4 * 4])
+            self.buf += data
+        obj, word = struct.unpack_from("<II", self.buf)
+        size = word >> 16
+        msg, self.buf = (obj, word & 0xFFFF, self.buf[8:size]), self.buf[size:]
+        if obj == 1 and msg[1] == 0:
+            _, code, n = struct.unpack_from("<III", msg[2])
+            raise Fail(f"Wayland error {code}: {msg[2][12:12 + n - 1].decode(errors='replace')}")
+        return msg
+
+    def copy(self):
+        registry, done = self.new_id(), self.new_id()
+        self.req(1, 1, struct.pack("<I", registry))  # wl_display.get_registry
+        self.req(1, 0, struct.pack("<I", done))  # wl_display.sync
+        self.flush()
+        found = {}
+        while True:
+            obj, op, p = self.recv()
+            if obj == done:
+                break
+            if obj == registry and op == 0:
+                name, n = struct.unpack_from("<II", p)
+                found[p[8:8 + n - 1].decode()] = name
+        if "ext_data_control_manager_v1" not in found:
+            raise Fail("the compositor has no ext_data_control_manager_v1")
+
+        def bind(iface):
+            new = self.new_id()
+            self.req(registry, 0, struct.pack("<I", found[iface]) + self.string(iface) + struct.pack("<II", 1, new))
+            return new
+
+        manager, seat = bind("ext_data_control_manager_v1"), bind("wl_seat")
+        device = self.new_id()
+        self.req(manager, 1, struct.pack("<II", device, seat))  # get_data_device
+        self.sources = []
+        for setter in (0, 2):  # set_selection, set_primary_selection
+            source = self.new_id()
+            self.req(manager, 0, struct.pack("<I", source))  # create_data_source
+            self.req(source, 0, self.string(self.UTF8))  # offer
+            self.req(device, setter, struct.pack("<I", source))
+            self.sources.append(source)
+        self.flush()
+
+    def serve(self):
+        try:
+            while True:
+                obj, op, p = self.recv()
+                if obj in self.sources and op == 0:  # send(mime_type, fd)
+                    fd = self.fds.pop(0)
+                    try:
+                        os.write(fd, self.text)
+                    finally:
+                        os.close(fd)
+                    self.sent += 1
+        except (Fail, OSError):
+            pass
+
+    def close(self):
+        self.s.close()
+
+
 def main():
     keep = "--keep" in sys.argv[1:]
     for tool in ("sway", "w0vncserver", "wev", "wl-copy", "wl-paste", "stdbuf"):
@@ -281,6 +384,32 @@ def main():
         wait_for("wl-paste to give the viewer's clipboard", pasted, procs=[("w0vncserver", w0)])
         log("clipboard reached the compositor")
 
+        # A copy as a browser makes one: the clipboard and the primary selection at once. A second server on the
+        # same sway sends no primary selection, so one copy checks both ways of reading it.
+        vnc_sock2 = os.path.join(tmp, "vnc2.sock")
+        w0b = start(
+            "w0vncserver-noprimary",
+            ["w0vncserver", "-rfbunixpath", vnc_sock2, "-rfbport", "-1", "-SecurityTypes", "None", "-AlwaysShared",
+             "-desktop", "smoke2", "-SendPrimary=0", "-Log", "*:stderr:100"],
+            dict(wl_env, XKB_DEFAULT_LAYOUT="us"),
+        )
+        wait_for("the second w0vncserver's socket", lambda: os.path.exists(vnc_sock2), procs=[("w0vncserver-noprimary", w0b)])
+        rfb2 = Rfb(vnc_sock2)
+        rfb2.handshake()
+        rfb2.set_encodings([Rfb.ENC_RAW])
+        rfb2.request_update()
+        rfb2.read_until("the second server's first update", lambda m: m[0] == "update")
+        both_text = "from-browser-" + secrets.token_hex(4)
+        copier = WlCopy(os.path.join(run, sock_name), both_text)
+        copier.copy()
+        threading.Thread(target=copier.serve, daemon=True).start()
+        try:
+            rfb.read_until("ServerCutText with a browser's copy (SendPrimary on)", lambda m: m[0] == "cut" and m[1] == both_text)
+            rfb2.read_until("ServerCutText with a browser's copy (SendPrimary off)", lambda m: m[0] == "cut" and m[1] == both_text)
+        finally:
+            copier.close()
+        log("a browser's copy reached both viewers")
+
         # The cursor: the seat had no pointer when capture started, so w0vncserver must make the cursor session
         # once its virtual pointer exists, and send the cursor's shape. Move the pointer onto the screen and wait
         # for a shape with something in it.
@@ -310,7 +439,7 @@ def main():
                     p.kill()
                     p.wait()
         if not ok or keep:
-            for name in ("sway", "w0vncserver", "wev"):
+            for name in ("sway", "w0vncserver", "w0vncserver-noprimary", "wev"):
                 text = read_file(os.path.join(tmp, f"{name}.log"))
                 print(f"----- {name}.log (last 60 lines) -----")
                 print("\n".join(text.splitlines()[-60:]))

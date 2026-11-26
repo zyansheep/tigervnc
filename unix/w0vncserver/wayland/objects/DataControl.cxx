@@ -100,9 +100,9 @@ const ext_data_control_source_v1_listener DataControl::sourceListener = {
 };
 
 const ext_data_control_offer_v1_listener DataControl::offerListener = {
-  .offer = [](void* data, ext_data_control_offer_v1*,
+  .offer = [](void* data, ext_data_control_offer_v1* offer,
               const char* mimeType) {
-    ((DataControl*)data)->handleOffer(mimeType);
+    ((DataControl*)data)->handleOffer(offer, mimeType);
   }
 };
 
@@ -112,10 +112,12 @@ DataControl::DataControl(Display* display, Seat* seat,
                          std::function<void(const char*)> sendClipboardDataCb_)
 :  Object(display, "ext_data_control_manager_v1",
           &ext_data_control_manager_v1_interface),
-   manager(nullptr), device(nullptr), lastOffer(nullptr),
+   manager(nullptr), device(nullptr), selectionOffer(nullptr),
+   primaryOffer(nullptr), currentOffer(nullptr),
    selectionSource(nullptr), primarySource(nullptr),
    readContext(nullptr), pendingReadMimeType(nullptr),
    readStream(nullptr), readCancellable(nullptr), readBuffer(""),
+   receiveQueued(false),
    clipboardAnnounceCb(clipboardAnnounceCb_),
    clipboardRequestCb(clipboardRequestCb_),
    sendClipboardDataCb(sendClipboardDataCb_)
@@ -154,17 +156,15 @@ DataControl::~DataControl()
   if (readCancellable)
     g_object_unref(readCancellable);
 
-  if (lastOffer) {
-    ext_data_control_offer_v1_destroy(lastOffer);
-    lastOffer = nullptr;
-  }
+  for (auto& o : offers)
+    ext_data_control_offer_v1_destroy(o.first);
+  offers.clear();
 }
 
 void DataControl::setSelection()
 {
   clearPendingWrites();
-  if (readContext)
-    g_cancellable_cancel(readCancellable);
+  cancelRead();
 
   if (selectionSource)
     ext_data_control_source_v1_destroy(selectionSource);
@@ -183,8 +183,7 @@ void DataControl::setSelection()
 void DataControl::setPrimarySelection()
 {
   clearPendingWrites();
-  if (readContext)
-    g_cancellable_cancel(readCancellable);
+  cancelRead();
 
   if (primarySource)
     ext_data_control_source_v1_destroy(primarySource);
@@ -209,8 +208,7 @@ void DataControl::clearSelection()
   ext_data_control_device_v1_set_selection(device, nullptr);
 
   clearPendingWrites();
-  if (readContext)
-    g_cancellable_cancel(readCancellable);
+  cancelRead();
 }
 
 void DataControl::clearPrimarySelection()
@@ -222,7 +220,12 @@ void DataControl::clearPrimarySelection()
   ext_data_control_device_v1_set_primary_selection(device, nullptr);
 
   clearPendingWrites();
-  if (readContext)
+  cancelRead();
+}
+
+void DataControl::cancelRead()
+{
+  if (readContext && readCancellable)
     g_cancellable_cancel(readCancellable);
 }
 
@@ -231,16 +234,23 @@ void DataControl::receive()
   int pipeFd[2];
   const char* mimeType;
 
-  // Nothing to receive
-  if (!lastOffer)
+  // Nothing to receive, or only what a viewer gave us
+  if (!currentOffer || isOwn(currentOffer))
     return;
 
-  if (readContext)
+  if (readContext) {
+    // A read of what is no longer the selection, cancelled but not
+    // finished yet: this one starts when it has. Returning here
+    // instead would leave the server waiting for an answer that
+    // never comes, and it asks us again only after the next change.
+    if (readCancellable && g_cancellable_is_cancelled(readCancellable))
+      receiveQueued = true;
     return;
+  }
 
   mimeType = nullptr;
   for (const char* m : MIME_TYPES) {
-    if (availableMimeTypes.find(m) != availableMimeTypes.end()) {
+    if (offers.at(currentOffer).count(m)) {
       mimeType = m;
       break;
     }
@@ -257,7 +267,7 @@ void DataControl::receive()
   readContext = new ReadContext{this, true};
   pendingReadMimeType = mimeType;
 
-  ext_data_control_offer_v1_receive(lastOffer, mimeType, pipeFd[1]);
+  ext_data_control_offer_v1_receive(currentOffer, mimeType, pipeFd[1]);
   close(pipeFd[1]);
 
   readCancellable = g_cancellable_new();
@@ -329,80 +339,93 @@ void DataControl::writePending(const char* data)
 
 void DataControl::handleDataOffer(ext_data_control_offer_v1* offer)
 {
-  if (lastOffer)
-    ext_data_control_offer_v1_destroy(lastOffer);
-
+  // Only introduced: the selection or primary_selection event that
+  // follows says which selection it is. Until then nothing changes.
   ext_data_control_offer_v1_add_listener(offer, &offerListener, this);
-  lastOffer = offer;
-  availableMimeTypes.clear();
+  offers[offer];
+}
 
-  clearPendingWrites();
-  if (readContext)
-    g_cancellable_cancel(readCancellable);
-  clipboardAnnounceCb(false);
+bool DataControl::isOwn(ext_data_control_offer_v1* offer)
+{
+  auto it = offers.find(offer);
+  // Ignore our own requests
+  return it != offers.end() && it->second.count(tigervncMimeType);
+}
+
+bool DataControl::hasText(ext_data_control_offer_v1* offer)
+{
+  auto it = offers.find(offer);
+  if (it == offers.end())
+    return false;
+  for (const char* m : MIME_TYPES) {
+    if (it->second.count(m))
+      return true;
+  }
+  return false;
+}
+
+void DataControl::setCurrent(ext_data_control_offer_v1* offer)
+{
+  if (offer == currentOffer)
+    return;
+
+  // What was being read is no longer what viewers are told of
+  cancelRead();
+  currentOffer = offer;
+  // Our own data is the viewers' already: nothing to announce
+  if (isOwn(offer))
+    return;
+  clipboardAnnounceCb(hasText(offer));
+}
+
+void DataControl::pruneOffers()
+{
+  for (auto it = offers.begin(); it != offers.end();) {
+    if (it->first == selectionOffer || it->first == primaryOffer) {
+      ++it;
+      continue;
+    }
+    ext_data_control_offer_v1_destroy(it->first);
+    it = offers.erase(it);
+  }
 }
 
 void DataControl::handleSelection(ext_data_control_offer_v1* offer)
 {
-  bool validMimeType;
-
-  if (!offer) {
-    clipboardAnnounceCb(false);
-    return;
-  }
-
-  if (offer != lastOffer) {
+  if (offer && !offers.count(offer)) {
     vlog.error("Got unexpected clipboard offer - ignoring");
     return;
   }
 
-  // Ignore our own requests
-  if (availableMimeTypes.find(tigervncMimeType) != availableMimeTypes.end())
-    return;
-
-  validMimeType = false;
-  for (const char* m : MIME_TYPES) {
-    if (availableMimeTypes.find(m) != availableMimeTypes.end()) {
-      validMimeType = true;
-      break;
-    }
-  }
-
-  if (validMimeType)
-    clipboardAnnounceCb(true);
+  ext_data_control_offer_v1* old = selectionOffer;
+  selectionOffer = offer;
+  // Someone else's: the requests our own source still waits on are
+  // for data that is not the clipboard any more
+  if (offer && !isOwn(offer))
+    clearPendingWrites();
+  if (offer)
+    setCurrent(offer);
+  else if (currentOffer == old)
+    setCurrent(sendPrimary ? primaryOffer : nullptr);
+  pruneOffers();
 }
 
 void DataControl::handlePrimarySelection(ext_data_control_offer_v1* offer)
 {
-  bool validMimeType;
-
-  if (!sendPrimary)
-    return;
-
-  if (!offer) {
-    clipboardAnnounceCb(false);
-    return;
-  }
-
-  if (offer != lastOffer) {
+  if (offer && !offers.count(offer)) {
     vlog.error("Got unexpected clipboard offer - ignoring");
     return;
   }
 
-  // Ignore our own requests
-  if (availableMimeTypes.find(tigervncMimeType) != availableMimeTypes.end())
-    return;
-
-  validMimeType = false;
-  for (const char* m : MIME_TYPES) {
-    if (availableMimeTypes.find(m) != availableMimeTypes.end()) {
-      validMimeType = true;
-      break;
-    }
+  ext_data_control_offer_v1* old = primaryOffer;
+  primaryOffer = offer;
+  if (sendPrimary) {
+    if (offer)
+      setCurrent(offer);
+    else if (currentOffer == old)
+      setCurrent(selectionOffer);
   }
-
-  if (validMimeType)
-    clipboardAnnounceCb(true);
+  pruneOffers();
 }
 
 void DataControl::handleFinished()
@@ -415,10 +438,6 @@ void DataControl::handleSend(const char* mimeType, int32_t fd)
 {
   bool validMimeType;
 
-  if (lastOffer)
-    ext_data_control_offer_v1_destroy(lastOffer);
-
-  lastOffer = nullptr;
   validMimeType = false;
 
   for (const char* m : MIME_TYPES) {
@@ -449,10 +468,10 @@ void DataControl::handleCancelled(ext_data_control_source_v1* source)
     selectionSource = nullptr;
 }
 
-void DataControl::handleOffer(const char* mimeType)
+void DataControl::handleOffer(ext_data_control_offer_v1* offer,
+                              const char* mimeType)
 {
-  // FIXME: How do we distinguish between selection and primary?
-  availableMimeTypes.insert(mimeType);
+  offers[offer].insert(mimeType);
 }
 
 // FIXME: This is identical to the Portal's
@@ -467,9 +486,17 @@ void DataControl::handleReadDataCallback(GAsyncResult* res)
 
   bytes = g_input_stream_read_bytes_finish(readStream, res, &error);
 
+  // Cancelled after this read had already got its bytes, or the end:
+  // they are of what is no longer the selection, so dropped as well
+  if (!error && g_cancellable_is_cancelled(readCancellable)) {
+    g_bytes_unref(bytes);
+    g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                        "Operation was cancelled");
+  }
+
   if (error) {
     if (error->code == G_IO_ERROR_CANCELLED)
-      vlog.error("Cancelled reading clipboard data");
+      vlog.debug("Cancelled reading clipboard data");
     else
       vlog.error("Failed to read clipboard data: %s", error->message);
 
@@ -480,6 +507,10 @@ void DataControl::handleReadDataCallback(GAsyncResult* res)
     readCancellable = nullptr;
     delete readContext;
     readContext = nullptr;
+    if (receiveQueued) {
+      receiveQueued = false;
+      receive();
+    }
     return;
   }
 

@@ -29,6 +29,7 @@ struct ext_data_control_offer_v1_listener;
 
 #include <functional>
 #include <string>
+#include <map>
 #include <queue>
 #include <set>
 
@@ -75,7 +76,18 @@ namespace wayland {
     void handleCancelled(ext_data_control_source_v1* source);
 
     // ext_data_control_offer_v1 handlers
-    void handleOffer(const char* mimeType);
+    void handleOffer(ext_data_control_offer_v1* offer, const char* mimeType);
+
+    // The offer viewers are told of and receive() reads: the
+    // clipboard's or (with SendPrimary) the primary selection's,
+    // whichever changed last
+    void setCurrent(ext_data_control_offer_v1* offer);
+    // Whether an offer is one of ours, and whether it has text
+    bool isOwn(ext_data_control_offer_v1* offer);
+    bool hasText(ext_data_control_offer_v1* offer);
+    // Destroy the offers that are neither selection any more
+    void pruneOffers();
+    void cancelRead();
 
     void handleReadDataCallback(GAsyncResult* res);
 
@@ -87,8 +99,14 @@ namespace wayland {
     ext_data_control_manager_v1* manager;
     ext_data_control_device_v1* device;
 
-    // Keep track of the most recent offer
-    ext_data_control_offer_v1* lastOffer;
+    // Every offer the compositor has introduced and we have not
+    // destroyed, with its mime types. The clipboard and the primary
+    // selection each have their own: a new primary selection must
+    // not take the place of the clipboard, or cancel reading it.
+    std::map<ext_data_control_offer_v1*, std::set<std::string>> offers;
+    ext_data_control_offer_v1* selectionOffer;
+    ext_data_control_offer_v1* primaryOffer;
+    ext_data_control_offer_v1* currentOffer;
 
     ext_data_control_source_v1* selectionSource;
     ext_data_control_source_v1* primarySource;
@@ -98,8 +116,9 @@ namespace wayland {
     GInputStream* readStream;
     GCancellable* readCancellable;
     std::string readBuffer;
-
-    std::set<std::string> availableMimeTypes;
+    // A read was asked for while a cancelled one had not finished:
+    // it starts once that one has
+    bool receiveQueued;
     std::queue<PendingData> pendingWrites;
 
     std::function<void(bool available)> clipboardAnnounceCb;
