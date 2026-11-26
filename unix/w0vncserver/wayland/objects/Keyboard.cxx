@@ -24,6 +24,7 @@
 #include <sys/mman.h>
 
 #include <string.h>
+#include <unistd.h>
 
 #include <xkbcommon/xkbcommon.h>
 #include <wayland-client-protocol.h>
@@ -69,6 +70,17 @@ const wl_keyboard_listener Keyboard::listener = {
   .repeat_info = [](void*, wl_keyboard*, int32_t, int32_t) {}
 };
 
+// Unique across Keyboard objects, so that a keyboard the seat replaces
+// never repeats the serial of the one before it
+static uint32_t nextKeymapSerial()
+{
+  static uint32_t serial = 0;
+
+  if (++serial == 0)
+    serial = 1;
+  return serial;
+}
+
 struct XkbContext {
   xkb_context* ctx;
   xkb_state* state;
@@ -77,7 +89,7 @@ struct XkbContext {
 
 Keyboard::Keyboard(Display* display, Seat* seat,
                    std::function<void(unsigned int)> setLEDstate_)
-  : keyboardFormat(0), keyboardFd(0), keyboardSize(0),
+  : keyboardFormat(0), keyboardFd(-1), keyboardSize(0), keymapSerial(0),
     keyboard(nullptr), keyMap(nullptr), context(nullptr),
     setLEDstate(setLEDstate_)
 {
@@ -131,8 +143,13 @@ bool Keyboard::updateState(uint32_t keycode, bool down,
 
 void Keyboard::handleKeyMap(uint32_t format, int32_t fd, uint32_t size)
 {
-  if (!context || !context->ctx)
+  // The fd is ours: every path below either keeps it as keyboardFd
+  // (closed by clearKeyMap() or the next keymap) or closes it
+
+  if (!context || !context->ctx) {
+    close(fd);
     return;
+  }
 
   // https://wayland.app/protocols/wayland#wl_keyboard:enum:keymap_format
   // Format is either:
@@ -147,21 +164,32 @@ void Keyboard::handleKeyMap(uint32_t format, int32_t fd, uint32_t size)
     if (newKeyMap == MAP_FAILED) {
       vlog.error(_("Failed to access keyboard layout: %s"),
                  strerror(errno));
+      close(fd);
       clearKeyMap();
       return;
     }
 
-    if (keyMap && strcmp(keyMap, newKeyMap) == 0) {
+    if (keyMap && keyboardSize == size &&
+        memcmp(keyMap, newKeyMap, size) == 0) {
       // Keymap unchanged, no need to update anything.
       // This is a workaround for where zwp_virtual_keyboard_v1_keymap()
       // will trigger a keymap event with the same keymap as before
+      munmap(newKeyMap, size);
+      close(fd);
       return;
     }
 
     if (keyMap)
       munmap(keyMap, keyboardSize);
+    if (keyboardFd >= 0)
+      close(keyboardFd);
 
+    // Keep the mapping and the fd together, so that clearKeyMap() frees
+    // the right ones if the keymap fails to load below
     keyMap = newKeyMap;
+    keyboardFormat = format;
+    keyboardFd = fd;
+    keyboardSize = size;
 
     map = xkb_keymap_new_from_buffer(context->ctx, keyMap,
                                      size,
@@ -189,12 +217,11 @@ void Keyboard::handleKeyMap(uint32_t format, int32_t fd, uint32_t size)
     context->state = state;
 
     vlog.debug("Keymap updated");
-    keyboardFormat = format;
-    keyboardFd = fd;
-    keyboardSize = size;
+    keymapSerial = nextKeymapSerial();
     generateKeycodeMap();
   } else {
     vlog.error(_("Unsupported keymap format: %d"), format);
+    close(fd);
     clearKeyMap();
   }
 }
@@ -324,8 +351,11 @@ void Keyboard::clearKeyMap()
   if (keyMap) {
     munmap(keyMap, keyboardSize);
     keyMap = nullptr;
-    keyboardFd = -1;
     keyboardSize = 0;
+  }
+  if (keyboardFd >= 0) {
+    close(keyboardFd);
+    keyboardFd = -1;
   }
 
   if (context) {
