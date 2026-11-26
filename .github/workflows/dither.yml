@@ -1,0 +1,61 @@
+# Keeps the `dither` branch on upstream's newest stable tag, and builds, smoke-tests and releases it
+# (contrib/dither/README.md). Pushes with a deploy key (secret DITHER_DEPLOY_KEY): a rebase can bring workflow file
+# changes, which GITHUB_TOKEN may not push, and a push made with GITHUB_TOKEN would not run this workflow either. The
+# run that pushes has already built and tested what it pushes; the push run it starts finds the commit released and
+# stops.
+name: Track upstream
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+  push:
+    branches: [dither]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: dither
+  cancel-in-progress: false
+
+jobs:
+  track:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || 'dither' }}
+          fetch-depth: 0
+          ssh-key: ${{ secrets.DITHER_DEPLOY_KEY }}
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Track, build, test and release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DITHER_STAGE_FILE: ${{ runner.temp }}/dither-stage
+        run: |
+          git config user.name "dither tracker"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mode=track
+          if [ "${{ github.event_name }}" = push ]; then mode=check; fi
+          contrib/dither/ci.sh "$mode" 2>&1 | tee "$RUNNER_TEMP/dither.log"
+
+      - name: Report the failure in an issue
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DITHER_STAGE_FILE: ${{ runner.temp }}/dither-stage
+        run: contrib/dither/report.sh failure "$RUNNER_TEMP/dither.log"
+
+      - name: Close the failure issue
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: contrib/dither/report.sh success
