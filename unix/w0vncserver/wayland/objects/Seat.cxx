@@ -43,7 +43,7 @@ const wl_seat_listener Seat::listener = {
 Seat::Seat(Display* display_, std::function<void(unsigned int)> setLEDstate_)
   : Object(display_, "wl_seat", &wl_seat_interface),
     seat(nullptr), display(display_), keyboard(nullptr),
-    pointer(nullptr), setLEDstate(setLEDstate_)
+    pointer(nullptr), pointerSerial(0), setLEDstate(setLEDstate_)
 {
   seat = (wl_seat*)boundObject;
 
@@ -62,14 +62,52 @@ Seat::~Seat()
 
 void Seat::seatCapabilities(uint32_t capabilities)
 {
+  // The event lists every capability the seat has now, so a keyboard or
+  // pointer we already have stays: replacing it would drop its keymap
+  // (or the cursor session made from it) each time the other one comes
+  // or goes, as a virtual keyboard or pointer does.
+
   if (capabilities & WL_SEAT_CAPABILITY_KEYBOARD) {
-    vlog.debug("Keyboard detected");
+    if (!keyboard) {
+      vlog.debug("Keyboard detected");
+      keyboard = new Keyboard(display, this, setLEDstate);
+    }
+  } else if (keyboard) {
+    vlog.debug("Keyboard removed");
     delete keyboard;
-    keyboard = new Keyboard(display, this, setLEDstate);
+    keyboard = nullptr;
   }
 
   if (capabilities & WL_SEAT_CAPABILITY_POINTER) {
-      delete pointer;
+    if (!pointer) {
+      vlog.debug("Pointer detected");
       pointer = new Pointer(display, this);
+      pointerSerial++;
+      pointerChanged();
+    }
+  } else if (pointer) {
+    vlog.debug("Pointer removed");
+    delete pointer;
+    pointer = nullptr;
+    pointerChanged();
   }
+}
+
+void Seat::addPointerListener(void* owner, std::function<void()> cb)
+{
+  pointerListeners[owner] = cb;
+}
+
+void Seat::removePointerListener(void* owner)
+{
+  pointerListeners.erase(owner);
+}
+
+void Seat::pointerChanged()
+{
+  // A copy: a listener may remove itself
+  std::map<void*, std::function<void()>> listeners = pointerListeners;
+
+  for (auto& entry : listeners)
+    entry.second();
 }
