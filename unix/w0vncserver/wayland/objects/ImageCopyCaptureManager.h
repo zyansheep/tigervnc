@@ -51,12 +51,19 @@ namespace wayland {
     void createSession();
 
   private:
+    // Makes, remakes or drops the cursor session to match the seat's
+    // pointer
+    void updateCursorSession();
+
+  private:
     ext_image_copy_capture_manager_v1* manager;
     Display* display;
     ImageCaptureSource* source;
     ImageCopyCaptureSession* session;
     Seat* seat;
     ImageCopyCaptureCursorSession* cursorSession;
+    // The seat's pointer serial the cursor session was made for
+    uint32_t cursorPointerSerial;
     std::function<void(uint8_t*, core::Region, uint32_t, uint32_t)> bufferEventCb;
     std::function<void(int, int, const core::Point&, uint32_t, uint32_t, const uint8_t*)> cursorImageCb;
     std::function<void(const core::Point&)> cursorPosCb;
