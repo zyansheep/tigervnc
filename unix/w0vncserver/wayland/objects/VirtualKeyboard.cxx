@@ -106,7 +106,7 @@ VirtualKeyboard::VirtualKeyboard(Display* display, Seat* seat_)
   : Object(display, "zwp_virtual_keyboard_manager_v1",
            &zwp_virtual_keyboard_manager_v1_interface),
     manager(nullptr), keyboard(nullptr), seat(seat_),
-    keyboardFd(0)
+    keymapSerial(0)
 {
   manager = (zwp_virtual_keyboard_manager_v1*) boundObject;
 
@@ -133,7 +133,7 @@ VirtualKeyboard::~VirtualKeyboard()
 
 unsigned int VirtualKeyboard::getLEDState()
 {
-  if (!keyboardFd || !seat->getKeyboard())
+  if (!keymapSerial || !seat->getKeyboard())
     return rfb::ledUnknown;
 
   if (keymapUpdated())
@@ -157,7 +157,7 @@ void VirtualKeyboard::key(uint32_t keysym, uint32_t keycode, bool down)
   if (keymapUpdated())
     setupKeyboard();
 
-  if (!keyboardFd)
+  if (!keymapSerial)
     return;
 
   wKeyboard = seat->getKeyboard();
@@ -207,14 +207,14 @@ bool VirtualKeyboard::keymapUpdated()
   if (!wKeyboard || !wKeyboard->hasKeymap())
     return false;
 
-  return keyboardFd != wKeyboard->getFd();
+  return keymapSerial != wKeyboard->getKeymapSerial();
 }
 
 void VirtualKeyboard::setupKeyboard()
 {
   assert(seat->getKeyboard());
 
-  if (!keyboardFd)
+  if (!keymapSerial)
     vlog.debug("Keymap set - keyboard will now work");
 
   zwp_virtual_keyboard_v1_keymap(keyboard,
@@ -222,5 +222,5 @@ void VirtualKeyboard::setupKeyboard()
                                  seat->getKeyboard()->getFd(),
                                  seat->getKeyboard()->getSize());
 
-  keyboardFd = seat->getKeyboard()->getFd();
+  keymapSerial = seat->getKeyboard()->getKeymapSerial();
 }

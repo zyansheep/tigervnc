@@ -39,6 +39,9 @@ namespace wayland {
     int32_t getFd() const { return keyboardFd; }
     uint32_t getSize() const { return keyboardSize; }
     bool hasKeymap() const { return keyMap != nullptr; }
+    // Changes each time a new keymap is loaded, and differs between
+    // Keyboard objects. Never 0 once there is one.
+    uint32_t getKeymapSerial() const { return keymapSerial; }
 
     // Get the current LED state
     unsigned int getLEDState();
@@ -65,6 +68,7 @@ namespace wayland {
     uint32_t keyboardFormat;
     int32_t keyboardFd;
     uint32_t keyboardSize;
+    uint32_t keymapSerial;
     wl_keyboard* keyboard;
     char* keyMap;
     static const wl_keyboard_listener listener;

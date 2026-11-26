@@ -47,7 +47,8 @@ namespace wayland {
     zwp_virtual_keyboard_manager_v1* manager;
     zwp_virtual_keyboard_v1* keyboard;
     Seat* seat;
-    int keyboardFd;
+    // The Keyboard's keymap serial we last sent, 0 if none
+    uint32_t keymapSerial;
   };
 };
 
