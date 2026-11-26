@@ -11,7 +11,9 @@ The `dither` branch carries two kinds of commits on top of TigerVNC's latest sta
    If upstream makes a 1.16.3, backporting [#2159](https://github.com/TigerVNC/tigervnc/pull/2159) and
    [#2053](https://github.com/TigerVNC/tigervnc/pull/2053) to `1.16-branch` is what makes 1.16 run on a headless
    compositor at all.
-2. **Our own four commits.** They are drafted below as one pull request. The same four commits rebased onto master
+2. **Our own commits.** Four are drafted below as one pull request. A fifth, "Keep the clipboard and the primary
+   selection apart", fixes DataControl as upstream's master has it too (a browser's copy, both selections set at
+   once, lost the clipboard), and could go as a pull request of its own; it is not drafted yet. The same four commits rebased onto master
    are on the fork's branch
    [`upstream-w0vncserver-headless`](https://github.com/zyansheep/tigervnc/tree/upstream-w0vncserver-headless),
    with master's translated log messages kept. That branch builds on master (d07907c8a154) and passes the same smoke
