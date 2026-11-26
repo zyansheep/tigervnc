@@ -20,6 +20,7 @@
 #define __WAYLAND_SEAT_H__
 
 #include <functional>
+#include <map>
 
 #include "Object.h"
 
@@ -39,15 +40,24 @@ namespace wayland {
     wl_seat* getSeat() const { return seat; }
     Keyboard* getKeyboard() const { return keyboard; }
     Pointer* getPointer() const { return pointer; }
+    // Changes each time the seat gains a pointer
+    uint32_t getPointerSerial() const { return pointerSerial; }
+
+    // Called after the seat gains or loses its pointer, until removed
+    void addPointerListener(void* owner, std::function<void()> cb);
+    void removePointerListener(void* owner);
 
   private:
     void seatCapabilities(uint32_t capabilities);
+    void pointerChanged();
 
   private:
     wl_seat* seat;
     Display* display;
     Keyboard* keyboard;
     Pointer* pointer;
+    uint32_t pointerSerial;
+    std::map<void*, std::function<void()>> pointerListeners;
     static const wl_seat_listener listener;
     std::function<void(unsigned int)> setLEDstate;
   };
